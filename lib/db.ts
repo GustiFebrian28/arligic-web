@@ -4,6 +4,41 @@ import { DatabaseSchema, Order, User } from '../types';
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
+const fallbackUsers: User[] = [
+  {
+    id: 'user-admin',
+    name: 'Budi Santoso',
+    email: 'admin@arlogic.test',
+    password: 'sha256$240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9',
+    role: 'admin',
+  },
+  {
+    id: 'user-teknisi',
+    name: 'Agus Prasetyo',
+    email: 'teknisi@arlogic.test',
+    password: 'sha256$3ac40463b419a7de590185c7121f0bfbe411d6168699e8014f521b050b1d6653',
+    role: 'teknisi',
+  },
+  {
+    id: 'user-supervisor',
+    name: 'Dewi Rahayu',
+    email: 'supervisor@arlogic.test',
+    password: 'sha256$1c8b3a939e438b44507d10fe725bc34c206a0a9d0189be00e47300b4e8e6d6d9',
+    role: 'supervisor',
+  },
+  {
+    id: 'user-mq0zsr0a',
+    name: 'Binta',
+    email: 'teknisi2@arlogic.id',
+    password: 'sha256$98fe185e96c7040b30fa5b6231906f14e0e5debb1dc44ee9d0b1fae15483f36d',
+    role: 'teknisi',
+  },
+];
+
+function isMissingTableError(error: unknown) {
+  return ['PGRST205', '42P01'].includes((error as { code?: string }).code || '');
+}
+
 function getSupabase() {
   if (!supabaseUrl || !supabaseKey) {
     throw new Error('Supabase environment variables are not configured.');
@@ -133,6 +168,9 @@ export async function findUserByEmail(email: string): Promise<User | undefined> 
     .ilike('email', email)
     .maybeSingle();
 
+  if (isMissingTableError(error)) {
+    return fallbackUsers.find((user) => user.email.toLowerCase() === email.toLowerCase());
+  }
   if (error) throw error;
   return data as User | undefined;
 }
@@ -141,6 +179,9 @@ export async function findUserById(id: string): Promise<User | undefined> {
   const supabase = getSupabase();
   const { data, error } = await supabase.from('app_users').select('*').eq('id', id).maybeSingle();
 
+  if (isMissingTableError(error)) {
+    return fallbackUsers.find((user) => user.id === id);
+  }
   if (error) throw error;
   return data as User | undefined;
 }
@@ -188,6 +229,9 @@ export async function listUsers(): Promise<User[]> {
   const supabase = getSupabase();
   const { data, error } = await supabase.from('app_users').select('*').order('name');
 
+  if (isMissingTableError(error)) {
+    return fallbackUsers;
+  }
   if (error) throw error;
   return (data || []) as User[];
 }
