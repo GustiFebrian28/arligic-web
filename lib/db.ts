@@ -1,4 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
+import fs from 'fs/promises';
+import path from 'path';
 import { DatabaseSchema, Order, User } from '../types';
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -39,6 +41,10 @@ function isMissingTableError(error: unknown) {
   return ['PGRST205', '42P01'].includes((error as { code?: string }).code || '');
 }
 
+function isMissingColumnError(error: unknown) {
+  return ['PGRST204', '42703'].includes((error as { code?: string }).code || '');
+}
+
 function getSupabase() {
   if (!supabaseUrl || !supabaseKey) {
     throw new Error('Supabase environment variables are not configured.');
@@ -55,6 +61,7 @@ function getSupabase() {
 type OrderRow = {
   id: string;
   customer_name: string;
+  description?: string | null;
   phone: string | null;
   brand: string | null;
   model: string | null;
@@ -80,33 +87,58 @@ type OrderRow = {
   created_at: string;
 };
 
+async function readFallbackDb(): Promise<DatabaseSchema> {
+  try {
+    const dbFile = path.join(process.cwd(), 'data', 'db.json');
+    const content = await fs.readFile(dbFile, 'utf-8');
+    return JSON.parse(content) as DatabaseSchema;
+  } catch {
+    return { users: fallbackUsers, orders: [] };
+  }
+}
+
+function parseOrderDescription(row: OrderRow): Partial<Order> {
+  if (!row.description) return {};
+
+  try {
+    const parsed = JSON.parse(row.description);
+    return typeof parsed === 'object' && parsed ? parsed : {};
+  } catch {
+    return {
+      issue: row.description,
+    };
+  }
+}
+
 function rowToOrder(row: OrderRow): Order {
+  const details = parseOrderDescription(row);
+
   return {
     id: row.id,
-    customer: row.customer_name,
-    phone: row.phone || '',
-    brand: row.brand || '',
-    model: row.model || '',
-    serial: row.serial || '',
-    issue: row.issue || '',
-    notes: row.notes || '',
+    customer: details.customer || row.customer_name,
+    phone: details.phone || row.phone || '',
+    brand: details.brand || row.brand || '',
+    model: details.model || row.model || '',
+    serial: details.serial || row.serial || '',
+    issue: details.issue || row.issue || '',
+    notes: details.notes || row.notes || '',
     status: row.status,
-    createdAt: row.created_at,
-    technicianId: row.technician_id,
-    workStartAt: row.work_start_at,
-    workEndAt: row.work_end_at,
-    photos: row.photos || [],
-    docPhotos: row.doc_photos || [],
-    notesTech: row.notes_tech || '',
-    services: row.services || [],
-    parts: row.parts || [],
-    qcApproved: Boolean(row.qc_approved),
-    qcNote: row.qc_note || '',
-    discount: row.discount || 0,
-    extraCost: row.extra_cost || 0,
-    qcBy: row.qc_by,
-    qcAt: row.qc_at,
-    pickupAt: row.pickup_at,
+    createdAt: details.createdAt || row.created_at,
+    technicianId: details.technicianId === undefined ? row.technician_id : details.technicianId,
+    workStartAt: details.workStartAt === undefined ? row.work_start_at : details.workStartAt,
+    workEndAt: details.workEndAt === undefined ? row.work_end_at : details.workEndAt,
+    photos: details.photos || row.photos || [],
+    docPhotos: details.docPhotos || row.doc_photos || [],
+    notesTech: details.notesTech || row.notes_tech || '',
+    services: details.services || row.services || [],
+    parts: details.parts || row.parts || [],
+    qcApproved: details.qcApproved === undefined ? Boolean(row.qc_approved) : details.qcApproved,
+    qcNote: details.qcNote || row.qc_note || '',
+    discount: details.discount === undefined ? row.discount || 0 : details.discount,
+    extraCost: details.extraCost === undefined ? row.extra_cost || 0 : details.extraCost,
+    qcBy: details.qcBy === undefined ? row.qc_by : details.qcBy,
+    qcAt: details.qcAt === undefined ? row.qc_at : details.qcAt,
+    pickupAt: details.pickupAt === undefined ? row.pickup_at : details.pickupAt,
   };
 }
 
@@ -136,6 +168,17 @@ function orderToRow(order: Order) {
     qc_by: order.qcBy,
     qc_at: order.qcAt,
     pickup_at: order.pickupAt,
+    created_at: order.createdAt,
+    updated_at: new Date().toISOString(),
+  };
+}
+
+function orderToLegacyRow(order: Order) {
+  return {
+    id: order.id,
+    customer_name: order.customer,
+    status: order.status,
+    description: JSON.stringify(order),
     created_at: order.createdAt,
     updated_at: new Date().toISOString(),
   };
@@ -198,20 +241,37 @@ export async function findOrderById(id: string): Promise<Order | undefined> {
   const supabase = getSupabase();
   const { data, error } = await supabase.from('service_orders').select('*').eq('id', id).maybeSingle();
 
-  if (error) throw error;
+  if (error) {
+    const fallback = await readFallbackDb();
+    return fallback.orders.find((order) => order.id === id);
+  }
   return data ? rowToOrder(data as OrderRow) : undefined;
 }
 
 export async function saveOrder(order: Order): Promise<Order> {
   const supabase = getSupabase();
-  const { data, error } = await supabase
+  const result = await supabase
     .from('service_orders')
     .upsert(orderToRow(order))
     .select('*')
     .single();
 
-  if (error) throw error;
-  return rowToOrder(data as OrderRow);
+  if (!result.error) {
+    return rowToOrder(result.data as OrderRow);
+  }
+
+  if (!isMissingColumnError(result.error)) {
+    throw result.error;
+  }
+
+  const legacyResult = await supabase
+    .from('service_orders')
+    .upsert(orderToLegacyRow(order))
+    .select('*')
+    .single();
+
+  if (legacyResult.error) throw legacyResult.error;
+  return rowToOrder(legacyResult.data as OrderRow);
 }
 
 export async function listOrders(): Promise<Order[]> {
@@ -221,8 +281,18 @@ export async function listOrders(): Promise<Order[]> {
     .select('*')
     .order('created_at', { ascending: false });
 
-  if (error) throw error;
-  return (data || []).map((row) => rowToOrder(row as OrderRow));
+  if (error) {
+    const fallback = await readFallbackDb();
+    return fallback.orders;
+  }
+
+  const orders = (data || []).map((row) => rowToOrder(row as OrderRow));
+  if (orders.length === 0) {
+    const fallback = await readFallbackDb();
+    return fallback.orders;
+  }
+
+  return orders;
 }
 
 export async function listUsers(): Promise<User[]> {
