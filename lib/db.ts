@@ -37,12 +37,16 @@ const fallbackUsers: User[] = [
   },
 ];
 
+function getErrorCode(error: unknown) {
+  return error && typeof error === 'object' ? (error as { code?: string }).code : undefined;
+}
+
 function isMissingTableError(error: unknown) {
-  return ['PGRST205', '42P01'].includes((error as { code?: string }).code || '');
+  return ['PGRST205', '42P01'].includes(getErrorCode(error) || '');
 }
 
 function isMissingColumnError(error: unknown) {
-  return ['PGRST204', '42703'].includes((error as { code?: string }).code || '');
+  return ['PGRST204', '42703'].includes(getErrorCode(error) || '');
 }
 
 function getMissingColumn(error: unknown) {
@@ -101,6 +105,16 @@ type OrderRow = {
   created_at: string;
 };
 
+type PhotoRow = {
+  id?: string;
+  order_id?: string;
+  url: string;
+  name?: string | null;
+  caption?: string | null;
+  type?: 'initial' | 'documentation' | null;
+  created_at?: string | null;
+};
+
 async function readFallbackDb(): Promise<DatabaseSchema> {
   try {
     const dbFile = path.join(process.cwd(), 'data', 'db.json');
@@ -124,8 +138,42 @@ function parseOrderDescription(row: OrderRow): Partial<Order> {
   }
 }
 
+function toArray<T>(value: unknown): T[] {
+  if (Array.isArray(value)) return value as T[];
+  if (typeof value === 'string' && value.trim()) {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function firstArray<T>(...values: T[][]) {
+  return values.find((value) => value.length > 0) || [];
+}
+
+function photoRowToPhoto(row: PhotoRow): Order['photos'][number] {
+  return {
+    id: row.id || crypto.randomUUID(),
+    type: row.type || 'initial',
+    name: row.name || 'Foto order',
+    url: row.url,
+    caption: row.caption || '',
+    uploadedAt: row.created_at || new Date().toISOString(),
+    uploadedBy: 'system',
+  };
+}
+
 function rowToOrder(row: OrderRow): Order {
   const details = parseOrderDescription(row);
+  const initialPhotos = toArray<Order['photos'][number]>(row.initial_photos);
+  const photos = toArray<Order['photos'][number]>(row.photos);
+  const docPhotos = toArray<Order['docPhotos'][number]>(row.doc_photos);
+  const services = toArray<Order['services'][number]>(row.services);
+  const parts = toArray<Order['parts'][number]>(row.parts);
 
   return {
     id: row.id,
@@ -141,11 +189,11 @@ function rowToOrder(row: OrderRow): Order {
     technicianId: details.technicianId === undefined ? row.technician_id : details.technicianId,
     workStartAt: details.workStartAt === undefined ? row.work_start_at : details.workStartAt,
     workEndAt: details.workEndAt === undefined ? row.work_end_at : details.workEndAt,
-    photos: details.photos || row.initial_photos || row.photos || [],
-    docPhotos: details.docPhotos || row.doc_photos || [],
+    photos: details.photos?.length ? details.photos : firstArray(initialPhotos, photos),
+    docPhotos: details.docPhotos?.length ? details.docPhotos : docPhotos,
     notesTech: details.notesTech || row.notes_tech || '',
-    services: details.services || row.services || [],
-    parts: details.parts || row.parts || [],
+    services: details.services?.length ? details.services : services,
+    parts: details.parts?.length ? details.parts : parts,
     qcApproved: details.qcApproved === undefined ? Boolean(row.qc_approved) : details.qcApproved,
     qcNote: details.qcNote || row.qc_note || '',
     discount: details.discount === undefined ? row.discount || 0 : details.discount,
@@ -232,6 +280,55 @@ function orderToMinimalRow(order: Order) {
   };
 }
 
+async function saveOrderPhotos(order: Order) {
+  const photos = [...(order.photos || []), ...(order.docPhotos || [])].filter((photo) => photo.url);
+  if (!photos.length) return;
+
+  const supabase = getSupabase();
+  const { data: existing } = await supabase.from('order_photos').select('url').eq('order_id', order.id);
+  const existingUrls = new Set(((existing || []) as Array<{ url: string }>).map((photo) => photo.url));
+  const rows = photos
+    .filter((photo) => !existingUrls.has(String(photo.url)))
+    .map((photo) => ({
+      order_id: order.id,
+      url: String(photo.url),
+    }));
+
+  if (!rows.length) return;
+
+  const { error } = await supabase.from('order_photos').insert(rows);
+  if (error && !isMissingTableError(error) && !isMissingColumnError(error)) {
+    throw error;
+  }
+}
+
+async function attachOrderPhotos(orders: Order[]) {
+  if (!orders.length) return orders;
+
+  const supabase = getSupabase();
+  const ids = orders.map((order) => order.id);
+  const { data, error } = await supabase.from('order_photos').select('*').in('order_id', ids);
+
+  if (error) return orders;
+
+  const photosByOrder = new Map<string, Order['photos']>();
+  for (const row of (data || []) as PhotoRow[]) {
+    if (!row.order_id || !row.url) continue;
+    const photos = photosByOrder.get(row.order_id) || [];
+    photos.push(photoRowToPhoto(row));
+    photosByOrder.set(row.order_id, photos);
+  }
+
+  return orders.map((order) => {
+    const storedPhotos = photosByOrder.get(order.id) || [];
+    if (!storedPhotos.length) return order;
+
+    const knownUrls = new Set((order.photos || []).map((photo) => String(photo.url)));
+    const mergedPhotos = [...(order.photos || []), ...storedPhotos.filter((photo) => !knownUrls.has(String(photo.url)))];
+    return { ...order, photos: mergedPhotos };
+  });
+}
+
 export async function getDb(): Promise<DatabaseSchema> {
   const [users, orders] = await Promise.all([listUsers(), listOrders()]);
   return { users, orders };
@@ -293,7 +390,14 @@ export async function findOrderById(id: string): Promise<Order | undefined> {
     const fallback = await readFallbackDb();
     return fallback.orders.find((order) => order.id === id);
   }
-  return data ? rowToOrder(data as OrderRow) : undefined;
+
+  if (!data) {
+    const fallback = await readFallbackDb();
+    return fallback.orders.find((order) => order.id === id);
+  }
+
+  const [order] = await attachOrderPhotos([rowToOrder(data as OrderRow)]);
+  return order;
 }
 
 export async function saveOrder(order: Order): Promise<Order> {
@@ -318,11 +422,14 @@ export async function saveOrder(order: Order): Promise<Order> {
   const result = await upsertOrderRow(orderToRow(order));
 
   if (!result.error) {
-    return {
+    await saveOrderPhotos(order);
+    const saved = rowToOrder(result.data as OrderRow);
+    const [withPhotos] = await attachOrderPhotos([{
       ...order,
-      ...rowToOrder(result.data as OrderRow),
-      photos: rowToOrder(result.data as OrderRow).photos.length ? rowToOrder(result.data as OrderRow).photos : order.photos,
-    };
+      ...saved,
+      photos: saved.photos.length ? saved.photos : order.photos,
+    }]);
+    return withPhotos;
   }
 
   if (!isMissingColumnError(result.error)) {
@@ -335,18 +442,25 @@ export async function saveOrder(order: Order): Promise<Order> {
     const minimalResult = await upsertOrderRow(orderToMinimalRow(order));
 
     if (minimalResult.error) throw minimalResult.error;
-    return {
+    await saveOrderPhotos(order);
+    const saved = rowToOrder(minimalResult.data as OrderRow);
+    const [withPhotos] = await attachOrderPhotos([{
       ...order,
-      ...rowToOrder(minimalResult.data as OrderRow),
-    };
+      ...saved,
+      photos: saved.photos.length ? saved.photos : order.photos,
+    }]);
+    return withPhotos;
   }
 
   if (legacyResult.error) throw legacyResult.error;
-  return {
+  await saveOrderPhotos(order);
+  const saved = rowToOrder(legacyResult.data as OrderRow);
+  const [withPhotos] = await attachOrderPhotos([{
     ...order,
-    ...rowToOrder(legacyResult.data as OrderRow),
-    photos: rowToOrder(legacyResult.data as OrderRow).photos.length ? rowToOrder(legacyResult.data as OrderRow).photos : order.photos,
-  };
+    ...saved,
+    photos: saved.photos.length ? saved.photos : order.photos,
+  }]);
+  return withPhotos;
 }
 
 export async function listOrders(): Promise<Order[]> {
@@ -361,13 +475,12 @@ export async function listOrders(): Promise<Order[]> {
     return fallback.orders;
   }
 
-  const orders = (data || []).map((row) => rowToOrder(row as OrderRow));
-  if (orders.length === 0) {
-    const fallback = await readFallbackDb();
-    return fallback.orders;
-  }
+  const orders = await attachOrderPhotos((data || []).map((row) => rowToOrder(row as OrderRow)));
+  const fallback = await readFallbackDb();
+  const orderIds = new Set(orders.map((order) => order.id));
+  const fallbackOrders = fallback.orders.filter((order) => !orderIds.has(order.id));
 
-  return orders;
+  return [...orders, ...fallbackOrders];
 }
 
 export async function listUsers(): Promise<User[]> {
