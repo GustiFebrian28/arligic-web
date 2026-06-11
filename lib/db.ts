@@ -45,6 +45,11 @@ function isMissingColumnError(error: unknown) {
   return ['PGRST204', '42703'].includes((error as { code?: string }).code || '');
 }
 
+function getMissingColumn(error: unknown) {
+  const message = (error as { message?: string }).message || '';
+  return message.match(/'([^']+)' column/)?.[1];
+}
+
 function getSupabase() {
   if (!supabaseUrl || !supabaseKey) {
     throw new Error('Supabase environment variables are not configured.');
@@ -63,6 +68,12 @@ type OrderRow = {
   invoice_id?: string | null;
   customer_name: string;
   customer_phone?: string | null;
+  watch_brand?: string | null;
+  watch_model?: string | null;
+  watch_serial?: string | null;
+  issue_description?: string | null;
+  customer_notes?: string | null;
+  initial_photos?: Order['photos'] | null;
   description?: string | null;
   phone: string | null;
   brand: string | null;
@@ -119,17 +130,17 @@ function rowToOrder(row: OrderRow): Order {
     id: row.id,
     customer: details.customer || row.customer_name,
     phone: details.phone || row.customer_phone || row.phone || '',
-    brand: details.brand || row.brand || '',
-    model: details.model || row.model || '',
-    serial: details.serial || row.serial || '',
-    issue: details.issue || row.issue || '',
-    notes: details.notes || row.notes || '',
+    brand: details.brand || row.watch_brand || row.brand || '',
+    model: details.model || row.watch_model || row.model || '',
+    serial: details.serial || row.watch_serial || row.serial || '',
+    issue: details.issue || row.issue_description || row.issue || '',
+    notes: details.notes || row.customer_notes || row.notes || '',
     status: row.status,
     createdAt: details.createdAt || row.created_at,
     technicianId: details.technicianId === undefined ? row.technician_id : details.technicianId,
     workStartAt: details.workStartAt === undefined ? row.work_start_at : details.workStartAt,
     workEndAt: details.workEndAt === undefined ? row.work_end_at : details.workEndAt,
-    photos: details.photos || row.photos || [],
+    photos: details.photos || row.initial_photos || row.photos || [],
     docPhotos: details.docPhotos || row.doc_photos || [],
     notesTech: details.notesTech || row.notes_tech || '',
     services: details.services || row.services || [],
@@ -150,6 +161,12 @@ function orderToRow(order: Order) {
     invoice_id: (order as Order & { invoiceId?: string }).invoiceId || order.id,
     customer_name: order.customer,
     customer_phone: order.phone,
+    watch_brand: order.brand,
+    watch_model: order.model,
+    watch_serial: order.serial || '',
+    issue_description: order.issue,
+    customer_notes: order.notes,
+    initial_photos: order.photos || [],
     phone: order.phone,
     brand: order.brand,
     model: order.model,
@@ -183,6 +200,12 @@ function orderToLegacyRow(order: Order) {
     invoice_id: (order as Order & { invoiceId?: string }).invoiceId || order.id,
     customer_name: order.customer,
     customer_phone: order.phone,
+    watch_brand: order.brand,
+    watch_model: order.model,
+    watch_serial: order.serial || '',
+    issue_description: order.issue,
+    customer_notes: order.notes,
+    initial_photos: order.photos || [],
     status: order.status,
     description: JSON.stringify(order),
     created_at: order.createdAt,
@@ -196,6 +219,12 @@ function orderToMinimalRow(order: Order) {
     invoice_id: (order as Order & { invoiceId?: string }).invoiceId || order.id,
     customer_name: order.customer,
     customer_phone: order.phone,
+    watch_brand: order.brand,
+    watch_model: order.model,
+    watch_serial: order.serial || '',
+    issue_description: order.issue,
+    customer_notes: order.notes,
+    initial_photos: order.photos || [],
     status: order.status,
     created_at: order.createdAt,
     updated_at: new Date().toISOString(),
@@ -268,11 +297,24 @@ export async function findOrderById(id: string): Promise<Order | undefined> {
 
 export async function saveOrder(order: Order): Promise<Order> {
   const supabase = getSupabase();
-  const result = await supabase
-    .from('service_orders')
-    .upsert(orderToRow(order))
-    .select('*')
-    .single();
+  async function upsertOrderRow(row: Record<string, unknown>) {
+    const payload = { ...row };
+
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      const result = await supabase.from('service_orders').upsert(payload).select('*').single();
+      const missingColumn = getMissingColumn(result.error);
+
+      if (!result.error || !missingColumn || !(missingColumn in payload)) {
+        return result;
+      }
+
+      delete payload[missingColumn];
+    }
+
+    return supabase.from('service_orders').upsert(payload).select('*').single();
+  }
+
+  const result = await upsertOrderRow(orderToRow(order));
 
   if (!result.error) {
     return rowToOrder(result.data as OrderRow);
@@ -282,18 +324,10 @@ export async function saveOrder(order: Order): Promise<Order> {
     throw result.error;
   }
 
-  const legacyResult = await supabase
-    .from('service_orders')
-    .upsert(orderToLegacyRow(order))
-    .select('*')
-    .single();
+  const legacyResult = await upsertOrderRow(orderToLegacyRow(order));
 
   if (isMissingColumnError(legacyResult.error)) {
-    const minimalResult = await supabase
-      .from('service_orders')
-      .upsert(orderToMinimalRow(order))
-      .select('*')
-      .single();
+    const minimalResult = await upsertOrderRow(orderToMinimalRow(order));
 
     if (minimalResult.error) throw minimalResult.error;
     return {
