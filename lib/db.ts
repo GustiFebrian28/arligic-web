@@ -46,6 +46,7 @@ function isMissingColumnError(error: unknown) {
 }
 
 function getMissingColumn(error: unknown) {
+  if (!error) return undefined;
   const message = (error as { message?: string }).message || '';
   return message.match(/'([^']+)' column/)?.[1];
 }
@@ -317,7 +318,11 @@ export async function saveOrder(order: Order): Promise<Order> {
   const result = await upsertOrderRow(orderToRow(order));
 
   if (!result.error) {
-    return rowToOrder(result.data as OrderRow);
+    return {
+      ...order,
+      ...rowToOrder(result.data as OrderRow),
+      photos: rowToOrder(result.data as OrderRow).photos.length ? rowToOrder(result.data as OrderRow).photos : order.photos,
+    };
   }
 
   if (!isMissingColumnError(result.error)) {
@@ -337,7 +342,11 @@ export async function saveOrder(order: Order): Promise<Order> {
   }
 
   if (legacyResult.error) throw legacyResult.error;
-  return rowToOrder(legacyResult.data as OrderRow);
+  return {
+    ...order,
+    ...rowToOrder(legacyResult.data as OrderRow),
+    photos: rowToOrder(legacyResult.data as OrderRow).photos.length ? rowToOrder(legacyResult.data as OrderRow).photos : order.photos,
+  };
 }
 
 export async function listOrders(): Promise<Order[]> {
