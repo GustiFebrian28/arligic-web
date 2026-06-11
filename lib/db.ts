@@ -184,6 +184,16 @@ function orderToLegacyRow(order: Order) {
   };
 }
 
+function orderToMinimalRow(order: Order) {
+  return {
+    id: order.id,
+    customer_name: order.customer,
+    status: order.status,
+    created_at: order.createdAt,
+    updated_at: new Date().toISOString(),
+  };
+}
+
 export async function getDb(): Promise<DatabaseSchema> {
   const [users, orders] = await Promise.all([listUsers(), listOrders()]);
   return { users, orders };
@@ -269,6 +279,20 @@ export async function saveOrder(order: Order): Promise<Order> {
     .upsert(orderToLegacyRow(order))
     .select('*')
     .single();
+
+  if (isMissingColumnError(legacyResult.error)) {
+    const minimalResult = await supabase
+      .from('service_orders')
+      .upsert(orderToMinimalRow(order))
+      .select('*')
+      .single();
+
+    if (minimalResult.error) throw minimalResult.error;
+    return {
+      ...order,
+      ...rowToOrder(minimalResult.data as OrderRow),
+    };
+  }
 
   if (legacyResult.error) throw legacyResult.error;
   return rowToOrder(legacyResult.data as OrderRow);
