@@ -60,6 +60,7 @@ function getSupabase() {
 
 type OrderRow = {
   id: string;
+  invoice_id?: string | null;
   customer_name: string;
   description?: string | null;
   phone: string | null;
@@ -145,6 +146,7 @@ function rowToOrder(row: OrderRow): Order {
 function orderToRow(order: Order) {
   return {
     id: order.id,
+    invoice_id: (order as Order & { invoiceId?: string }).invoiceId || order.id,
     customer_name: order.customer,
     phone: order.phone,
     brand: order.brand,
@@ -176,6 +178,7 @@ function orderToRow(order: Order) {
 function orderToLegacyRow(order: Order) {
   return {
     id: order.id,
+    invoice_id: (order as Order & { invoiceId?: string }).invoiceId || order.id,
     customer_name: order.customer,
     status: order.status,
     description: JSON.stringify(order),
@@ -187,6 +190,7 @@ function orderToLegacyRow(order: Order) {
 function orderToMinimalRow(order: Order) {
   return {
     id: order.id,
+    invoice_id: (order as Order & { invoiceId?: string }).invoiceId || order.id,
     customer_name: order.customer,
     status: order.status,
     created_at: order.createdAt,
