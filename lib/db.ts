@@ -62,6 +62,7 @@ type OrderRow = {
   id: string;
   invoice_id?: string | null;
   customer_name: string;
+  customer_phone?: string | null;
   description?: string | null;
   phone: string | null;
   brand: string | null;
@@ -117,7 +118,7 @@ function rowToOrder(row: OrderRow): Order {
   return {
     id: row.id,
     customer: details.customer || row.customer_name,
-    phone: details.phone || row.phone || '',
+    phone: details.phone || row.customer_phone || row.phone || '',
     brand: details.brand || row.brand || '',
     model: details.model || row.model || '',
     serial: details.serial || row.serial || '',
@@ -148,6 +149,7 @@ function orderToRow(order: Order) {
     id: order.id,
     invoice_id: (order as Order & { invoiceId?: string }).invoiceId || order.id,
     customer_name: order.customer,
+    customer_phone: order.phone,
     phone: order.phone,
     brand: order.brand,
     model: order.model,
@@ -180,6 +182,7 @@ function orderToLegacyRow(order: Order) {
     id: order.id,
     invoice_id: (order as Order & { invoiceId?: string }).invoiceId || order.id,
     customer_name: order.customer,
+    customer_phone: order.phone,
     status: order.status,
     description: JSON.stringify(order),
     created_at: order.createdAt,
@@ -192,6 +195,7 @@ function orderToMinimalRow(order: Order) {
     id: order.id,
     invoice_id: (order as Order & { invoiceId?: string }).invoiceId || order.id,
     customer_name: order.customer,
+    customer_phone: order.phone,
     status: order.status,
     created_at: order.createdAt,
     updated_at: new Date().toISOString(),
