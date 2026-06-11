@@ -1,4 +1,4 @@
-import { listUsers, getDb, saveDb } from '../../../lib/db';
+import { findUserByEmail, listUsers, saveUser } from '../../../lib/db';
 import type { UserRole } from '../../../types';
 import { NextRequest } from 'next/server';
 import { getUserFromCookie, hashPassword } from '../../../lib/auth';
@@ -26,16 +26,14 @@ export async function POST(req: NextRequest) {
     return new Response(JSON.stringify({ error: 'Name, email, and password are required.' }), { status: 400 });
   }
 
-  const db = await getDb();
-  const exists = db.users.find((u) => u.email.toLowerCase() === email.toLowerCase());
+  const exists = await findUserByEmail(email);
   if (exists) {
     return new Response(JSON.stringify({ error: 'Email already registered.' }), { status: 409 });
   }
 
   const id = 'user-' + Date.now().toString(36);
   const user = { id, name, email, role: selectedRole, password: hashPassword(password) };
-  db.users.unshift(user);
-  await saveDb(db);
+  await saveUser(user);
 
   return new Response(JSON.stringify({ user: { id, name, email, role } }), { status: 201 });
 }
