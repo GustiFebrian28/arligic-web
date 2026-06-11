@@ -19,7 +19,7 @@ export async function POST(req: NextRequest) {
   }
 
   const newOrder = {
-    id: `SRV-${new Date().getFullYear()}-${crypto.randomUUID().slice(0, 6).toUpperCase()}`,
+    id: crypto.randomUUID(),
     customer: body.customer,
     phone: body.phone,
     brand: body.brand,
